@@ -141,6 +141,10 @@ type columnWriter struct {
 	closed               bool
 	fallbackToNonDict    bool
 	dictPageWritten      bool
+	// fallbackFn is set by each typed column writer at construction to its
+	// own FallbackToPlain. It lets the base FlushCurrentPage trigger
+	// fallback without needing to know the concrete value type.
+	fallbackFn func()
 
 	pages []DataPage
 
@@ -265,14 +269,44 @@ func (w *columnWriter) commitWriteAndCheckPageLimit(numLevels, numValues int64) 
 	w.numBufferedValues += numLevels
 	w.numDataValues += numValues
 
-	enc := w.currentEncoder.EstimatedDataEncodedSize()
-	if enc >= w.props.DataPageSize() {
+	// While dictionary encoding is active we size pages by raw input bytes
+	// instead of the RLE-indices' encoded size. Mirrors parquet-mr's
+	// FallbackValuesWriter.getBufferedSize — it keeps dict pages roughly
+	// the same raw-byte footprint as the PLAIN pages they'd otherwise be,
+	// which also pulls the first-page compression check into the same
+	// cadence parquet-mr uses and avoids committing dict pages that only
+	// look cheap because their RLE indices are tiny.
+	var bufferedSize int64
+	if w.hasDict && !w.fallbackToNonDict {
+		bufferedSize = w.currentEncoder.(encoding.DictEncoder).ObservedRawSize()
+	} else {
+		bufferedSize = w.currentEncoder.EstimatedDataEncodedSize()
+	}
+	if bufferedSize >= w.props.DataPageSize() {
 		return w.FlushCurrentPage()
 	}
 	return nil
 }
 
 func (w *columnWriter) FlushCurrentPage() error {
+	// Before committing what would be the first dict-encoded data page,
+	// check whether dictionary encoding is actually saving space against
+	// a PLAIN baseline. This mirrors parquet-mr's
+	// FallbackValuesWriter.getBytes + isCompressionSatisfying: if the
+	// dictionary plus the encoded indices meet or exceed the raw input
+	// bytes, fall back to PLAIN now and discard the dictionary — avoiding
+	// the mid-cardinality case where a dict page stays in the file
+	// alongside PLAIN pages without any net compression win.
+	if w.hasDict && !w.fallbackToNonDict && !w.dictPageWritten && len(w.pages) == 0 && w.fallbackFn != nil {
+		dictEnc := w.currentEncoder.(encoding.DictEncoder)
+		rawSize := dictEnc.ObservedRawSize()
+		encodedSize := dictEnc.EstimatedDataEncodedSize()
+		dictSize := int64(dictEnc.DictEncodedSize())
+		if rawSize > 0 && dictSize+encodedSize >= rawSize {
+			w.fallbackFn()
+		}
+	}
+
 	var (
 		defLevelsRLESize int32 = 0
 		repLevelsRLESize int32 = 0

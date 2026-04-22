@@ -127,6 +127,12 @@ type DictEncoder interface {
 	// re-encoded with the fallback (PLAIN) encoder instead of being emitted
 	// as a stranded dict-encoded page.
 	FallBackTo(fallback TypedEncoder) error
+	// ObservedRawSize returns the raw input byte count accumulated since
+	// the last page flush. Used alongside DictEncodedSize and
+	// EstimatedDataEncodedSize to decide whether dictionary encoding is
+	// actually saving space before committing the first dict data page —
+	// mirrors parquet-mr's rawDataByteSize.
+	ObservedRawSize() int64
 }
 
 var bufferPool = sync.Pool{

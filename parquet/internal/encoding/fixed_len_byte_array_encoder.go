@@ -136,6 +136,7 @@ func (enc *DictFixedLenByteArrayEncoder) Put(in []parquet.FixedLenByteArray) {
 		}
 		enc.addIndex(memoIdx)
 	}
+	enc.AddRawSize(int64(len(in)) * int64(enc.typeLen))
 }
 
 // PutSpaced is like Put but leaves space for nulls

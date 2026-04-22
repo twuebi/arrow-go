@@ -114,16 +114,23 @@ func runDictFallbackNoDictPageCheck(t *testing.T, version parquet.Version, codec
 // path.
 func TestDictFallbackKeepsDictWhenAlreadyFlushed(t *testing.T) {
 	const (
-		numValues         = 30000
 		valueWidth        = 32
-		dictPageSizeLimit = 256 * 1024
-		// Tiny data page size forces the column writer to cut dict-encoded
-		// data pages early, so w.pages holds flushed pages by the time the
-		// dictionary overflows.
-		dataPageSize = 1024
+		dictPageSizeLimit = 8 * 1024
+		dataPageSize      = 4 * 1024
 	)
 
-	values := highCardinalityStrings(numValues, valueWidth)
+	// Mixed-cardinality data: a low-card prefix big enough that several
+	// dict-encoded data pages are flushed (and pass the first-page
+	// compression check) before a high-card tail overflows the dict and
+	// triggers fallback. The committed dict pages must be kept and the
+	// dictionary page preserved.
+	lowCard := make([]parquet.ByteArray, 5000)
+	for i := range lowCard {
+		lowCard[i] = parquet.ByteArray(fmt.Sprintf("cat_%02d%*s", i%16, valueWidth-8, ""))
+	}
+	highCard := highCardinalityStrings(5000, valueWidth)
+	values := append(lowCard, highCard...)
+
 	_, chunk := writeByteArrayColumn(t, values, parquet.V1_0, writerKnobs{
 		dictEnabled:       true,
 		dictPageSizeLimit: dictPageSizeLimit,
@@ -166,6 +173,69 @@ func absInt64(v int64) int64 {
 		return -v
 	}
 	return v
+}
+
+// TestDictFallbackMidCardinality exercises the case the iceberg-go TPC-DS
+// benchmark flagged: mid-cardinality columns (ss_list_price etc.) where the
+// dictionary grows slowly enough to pass the first-page compression check,
+// eventually overflows, and leaves a dict page + dict-encoded pages + PLAIN
+// pages stranded in one chunk. With dict-mode pages sized by raw bytes
+// (matching parquet-mr), overflow happens at a similar cadence to plain
+// encoding, so dict=on either stays competitive with dict=off or the
+// committed dict pages are genuinely earning their keep.
+func TestDictFallbackMidCardinality(t *testing.T) {
+	const (
+		numRows            = 200000
+		valueWidth         = 8
+		distinctValueCount = 20000
+		dictPageSizeLimit  = 128 * 1024
+		dataPageSize       = 128 * 1024
+	)
+
+	values := midCardinalityStrings(numRows, distinctValueCount, valueWidth)
+
+	_, dictOn := writeByteArrayColumn(t, values, parquet.V1_0, writerKnobs{
+		dictEnabled:       true,
+		dictPageSizeLimit: dictPageSizeLimit,
+		dataPageSize:      dataPageSize,
+		codec:             compress.Codecs.Snappy,
+	})
+	_, dictOff := writeByteArrayColumn(t, values, parquet.V1_0, writerKnobs{
+		dictEnabled:  false,
+		dataPageSize: dataPageSize,
+		codec:        compress.Codecs.Snappy,
+	})
+
+	t.Logf("mid-card: distinct=%d rows=%d width=%d", distinctValueCount, numRows, valueWidth)
+	t.Logf("dict=ON  compressed=%d encodings=%v", dictOn.totalCompressed, dictOn.encodings)
+	t.Logf("dict=OFF compressed=%d encodings=%v", dictOff.totalCompressed, dictOff.encodings)
+
+	// The specific assertion: dict=on must not regress against dict=off by
+	// more than a small constant. Before the raw-byte page cadence, this
+	// scenario produced the 4-entry encoding layout and 20-30% bloat.
+	require.LessOrEqualf(t,
+		dictOn.totalCompressed, dictOff.totalCompressed+int64(numRows)/10,
+		"dict=on (%d) must not balloon against dict=off (%d) on mid-card data",
+		dictOn.totalCompressed, dictOff.totalCompressed)
+}
+
+func midCardinalityStrings(n, distinct, width int) []parquet.ByteArray {
+	pool := make([]parquet.ByteArray, distinct)
+	for i := range pool {
+		b := make([]byte, width)
+		for j := range width {
+			b[j] = byte('A' + (i+j*7)%26)
+		}
+		tail := fmt.Appendf(nil, "-%05d", i)
+		copy(b[width-len(tail):], tail)
+		pool[i] = parquet.ByteArray(b)
+	}
+	out := make([]parquet.ByteArray, n)
+	for i := range out {
+		// Deterministic, roughly uniform distribution across the pool.
+		out[i] = pool[(i*2654435761)%distinct]
+	}
+	return out
 }
 
 type writerKnobs struct {

@@ -103,6 +103,7 @@ func (enc *DictByteArrayEncoder) PutByteArray(in parquet.ByteArray) {
 		enc.dictEncodedSize += in.Len() + arrow.Uint32SizeBytes
 	}
 	enc.addIndex(memoIdx)
+	enc.AddRawSize(int64(in.Len() + arrow.Uint32SizeBytes))
 }
 
 // Put takes a slice of ByteArrays to add and encode.

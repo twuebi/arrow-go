@@ -144,6 +144,7 @@ func (enc *typedDictEncoder[T]) Put(in []T) {
 	for _, val := range in {
 		enc.dictEncoder.Put(val)
 	}
+	enc.AddRawSize(int64(len(in)) * int64(unsafe.Sizeof(T(0))))
 }
 
 func (enc *typedDictEncoder[T]) PutSpaced(in []T, validBits []byte, validBitsOffset int64) {
@@ -443,6 +444,7 @@ func (enc *DictInt96Encoder) Put(in []parquet.Int96) {
 		}
 		enc.addIndex(memoIdx)
 	}
+	enc.AddRawSize(int64(len(in)) * int64(parquet.Int96SizeBytes))
 }
 
 // PutSpaced is like Put but assumes space for nulls

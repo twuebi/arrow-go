@@ -45,6 +45,7 @@ type Int32ColumnChunkWriter struct {
 func NewInt32ColumnChunkWriter(meta *metadata.ColumnChunkMetaDataBuilder, pager PageWriter, useDict bool, enc parquet.Encoding, props *parquet.WriterProperties) *Int32ColumnChunkWriter {
 	ret := &Int32ColumnChunkWriter{columnWriter: newColumnWriterBase(meta, pager, useDict, enc, props)}
 	ret.currentEncoder = encoding.Int32EncoderTraits.Encoder(format.Encoding(enc), useDict, meta.Descr(), props.Allocator())
+	ret.fallbackFn = ret.FallbackToPlain
 	return ret
 }
 
@@ -265,6 +266,7 @@ type Int64ColumnChunkWriter struct {
 func NewInt64ColumnChunkWriter(meta *metadata.ColumnChunkMetaDataBuilder, pager PageWriter, useDict bool, enc parquet.Encoding, props *parquet.WriterProperties) *Int64ColumnChunkWriter {
 	ret := &Int64ColumnChunkWriter{columnWriter: newColumnWriterBase(meta, pager, useDict, enc, props)}
 	ret.currentEncoder = encoding.Int64EncoderTraits.Encoder(format.Encoding(enc), useDict, meta.Descr(), props.Allocator())
+	ret.fallbackFn = ret.FallbackToPlain
 	return ret
 }
 
@@ -485,6 +487,7 @@ type Int96ColumnChunkWriter struct {
 func NewInt96ColumnChunkWriter(meta *metadata.ColumnChunkMetaDataBuilder, pager PageWriter, useDict bool, enc parquet.Encoding, props *parquet.WriterProperties) *Int96ColumnChunkWriter {
 	ret := &Int96ColumnChunkWriter{columnWriter: newColumnWriterBase(meta, pager, useDict, enc, props)}
 	ret.currentEncoder = encoding.Int96EncoderTraits.Encoder(format.Encoding(enc), useDict, meta.Descr(), props.Allocator())
+	ret.fallbackFn = ret.FallbackToPlain
 	return ret
 }
 
@@ -705,6 +708,7 @@ type Float32ColumnChunkWriter struct {
 func NewFloat32ColumnChunkWriter(meta *metadata.ColumnChunkMetaDataBuilder, pager PageWriter, useDict bool, enc parquet.Encoding, props *parquet.WriterProperties) *Float32ColumnChunkWriter {
 	ret := &Float32ColumnChunkWriter{columnWriter: newColumnWriterBase(meta, pager, useDict, enc, props)}
 	ret.currentEncoder = encoding.Float32EncoderTraits.Encoder(format.Encoding(enc), useDict, meta.Descr(), props.Allocator())
+	ret.fallbackFn = ret.FallbackToPlain
 	return ret
 }
 
@@ -925,6 +929,7 @@ type Float64ColumnChunkWriter struct {
 func NewFloat64ColumnChunkWriter(meta *metadata.ColumnChunkMetaDataBuilder, pager PageWriter, useDict bool, enc parquet.Encoding, props *parquet.WriterProperties) *Float64ColumnChunkWriter {
 	ret := &Float64ColumnChunkWriter{columnWriter: newColumnWriterBase(meta, pager, useDict, enc, props)}
 	ret.currentEncoder = encoding.Float64EncoderTraits.Encoder(format.Encoding(enc), useDict, meta.Descr(), props.Allocator())
+	ret.fallbackFn = ret.FallbackToPlain
 	return ret
 }
 
@@ -1148,6 +1153,7 @@ func NewBooleanColumnChunkWriter(meta *metadata.ColumnChunkMetaDataBuilder, page
 	}
 	ret := &BooleanColumnChunkWriter{columnWriter: newColumnWriterBase(meta, pager, useDict, enc, props)}
 	ret.currentEncoder = encoding.BooleanEncoderTraits.Encoder(format.Encoding(enc), useDict, meta.Descr(), props.Allocator())
+	ret.fallbackFn = ret.FallbackToPlain
 	return ret
 }
 
@@ -1490,6 +1496,7 @@ type ByteArrayColumnChunkWriter struct {
 func NewByteArrayColumnChunkWriter(meta *metadata.ColumnChunkMetaDataBuilder, pager PageWriter, useDict bool, enc parquet.Encoding, props *parquet.WriterProperties) *ByteArrayColumnChunkWriter {
 	ret := &ByteArrayColumnChunkWriter{columnWriter: newColumnWriterBase(meta, pager, useDict, enc, props)}
 	ret.currentEncoder = encoding.ByteArrayEncoderTraits.Encoder(format.Encoding(enc), useDict, meta.Descr(), props.Allocator())
+	ret.fallbackFn = ret.FallbackToPlain
 	return ret
 }
 
@@ -1783,6 +1790,7 @@ type FixedLenByteArrayColumnChunkWriter struct {
 func NewFixedLenByteArrayColumnChunkWriter(meta *metadata.ColumnChunkMetaDataBuilder, pager PageWriter, useDict bool, enc parquet.Encoding, props *parquet.WriterProperties) *FixedLenByteArrayColumnChunkWriter {
 	ret := &FixedLenByteArrayColumnChunkWriter{columnWriter: newColumnWriterBase(meta, pager, useDict, enc, props)}
 	ret.currentEncoder = encoding.FixedLenByteArrayEncoderTraits.Encoder(format.Encoding(enc), useDict, meta.Descr(), props.Allocator())
+	ret.fallbackFn = ret.FallbackToPlain
 	return ret
 }
 

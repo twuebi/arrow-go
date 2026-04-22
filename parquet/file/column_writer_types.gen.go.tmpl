@@ -49,6 +49,7 @@ func New{{.Name}}ColumnChunkWriter(meta *metadata.ColumnChunkMetaDataBuilder, pa
 {{- end}}
   ret := &{{.Name}}ColumnChunkWriter{columnWriter: newColumnWriterBase(meta, pager, useDict, enc, props)}
   ret.currentEncoder = encoding.{{.Name}}EncoderTraits.Encoder(format.Encoding(enc), useDict, meta.Descr(), props.Allocator())
+  ret.fallbackFn = ret.FallbackToPlain
   return ret
 }
 
