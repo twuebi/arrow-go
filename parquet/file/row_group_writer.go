@@ -35,6 +35,12 @@ type RowGroupWriter interface {
 	NumRows() (int, error)
 	// The total compressed bytes so
 	TotalCompressedBytes() int64
+	// TotalUncompressedBytes returns the cumulative uncompressed size (in bytes)
+	// of data pages emitted across all columns in this row group, including
+	// definition and repetition level bytes. This is the signal used to drive
+	// the bytes-based row group trigger (WithMaxRowGroupBytes); see the
+	// corresponding method on ColumnChunkWriter for caveats on what is counted.
+	TotalUncompressedBytes() int64
 	// the total bytes written and flushed out
 	TotalBytesWritten() int64
 	// Closes any unclosed columnwriters, and closes the rowgroup, writing out
@@ -67,12 +73,13 @@ type BufferedRowGroupWriter interface {
 }
 
 type rowGroupWriter struct {
-	sink                   utils.WriterTell
-	metadata               *metadata.RowGroupMetaDataBuilder
-	props                  *parquet.WriterProperties
-	bytesWritten           int64
-	compressedBytesWritten int64
-	closed                 bool
+	sink                     utils.WriterTell
+	metadata                 *metadata.RowGroupMetaDataBuilder
+	props                    *parquet.WriterProperties
+	bytesWritten             int64
+	compressedBytesWritten   int64
+	uncompressedBytesWritten int64
+	closed                   bool
 	ordinal                int16
 	nextColumnIdx          int
 	nrows                  int
@@ -156,6 +163,7 @@ func (rg *rowGroupWriter) NextColumn() (ColumnChunkWriter, error) {
 		}
 		rg.bytesWritten += rg.columnWriters[0].TotalBytesWritten()
 		rg.compressedBytesWritten += rg.columnWriters[0].TotalCompressedBytes()
+		rg.uncompressedBytesWritten += rg.columnWriters[0].TotalUncompressedBytes()
 	}
 	rg.nextColumnIdx++
 
@@ -230,6 +238,16 @@ func (rg *rowGroupWriter) TotalBytesWritten() int64 {
 	return total + rg.bytesWritten
 }
 
+func (rg *rowGroupWriter) TotalUncompressedBytes() int64 {
+	total := int64(0)
+	for _, wr := range rg.columnWriters {
+		if wr != nil {
+			total += wr.TotalUncompressedBytes()
+		}
+	}
+	return total + rg.uncompressedBytesWritten
+}
+
 func (rg *rowGroupWriter) Close() error {
 	if !rg.closed {
 		rg.closed = true
@@ -244,6 +262,7 @@ func (rg *rowGroupWriter) Close() error {
 				}
 				rg.bytesWritten += wr.TotalBytesWritten()
 				rg.compressedBytesWritten += wr.TotalCompressedBytes()
+				rg.uncompressedBytesWritten += wr.TotalUncompressedBytes()
 			}
 		}
 

@@ -26,6 +26,8 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/arrow-go/v18/parquet"
+	"github.com/apache/arrow-go/v18/parquet/compress"
+	"github.com/apache/arrow-go/v18/parquet/file"
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -207,6 +209,203 @@ func TestFileWriterTotalBytesBuffered(t *testing.T) {
 	// Verify total bytes & compressed bytes are correct
 	assert.Equal(t, int64(596), writer.TotalCompressedBytes())
 	assert.Equal(t, int64(1306), writer.TotalBytesWritten())
+}
+
+// buildInt64Record returns a single-column record batch of consecutive
+// int64 values [0, n) for row-group-sizing tests.
+func buildInt64Record(t *testing.T, mem memory.Allocator, n int64) (*arrow.Schema, arrow.RecordBatch) {
+	t.Helper()
+	schema := arrow.NewSchema([]arrow.Field{
+		{Name: "v", Type: arrow.PrimitiveTypes.Int64},
+	}, nil)
+
+	bldr := array.NewInt64Builder(mem)
+	defer bldr.Release()
+	for i := int64(0); i < n; i++ {
+		bldr.Append(i)
+	}
+	arr := bldr.NewArray()
+	defer arr.Release()
+
+	return schema, array.NewRecord(schema, []arrow.Array{arr}, n)
+}
+
+// readRowGroupMeta opens a parquet file from buf and returns (numRowGroups,
+// perRowGroupUncompressedSize, totalRows).
+func readRowGroupMeta(t *testing.T, buf []byte) (int, []int64, int64) {
+	t.Helper()
+	pf, err := file.NewParquetReader(bytes.NewReader(buf))
+	require.NoError(t, err)
+	defer pf.Close()
+
+	md := pf.MetaData()
+	n := md.NumRowGroups()
+	sizes := make([]int64, n)
+	var total int64
+	for i := 0; i < n; i++ {
+		rg := md.RowGroup(i)
+		sizes[i] = rg.TotalByteSize()
+		total += rg.NumRows()
+	}
+	return n, sizes, total
+}
+
+// TestFileWriterMaxRowGroupBytes verifies that configuring
+// WithMaxRowGroupBytes causes the buffered writer to close and open new row
+// groups once the accumulated uncompressed size crosses the threshold across
+// a stream of WriteBuffered calls.
+//
+// The trigger operates between WriteBuffered calls rather than splitting a
+// single record batch: there is no cheap way to know upfront how many input
+// rows will push us past a target byte size (the relationship depends on the
+// encoder and compressor), so WriteBuffered keeps one batch in one row group
+// and relies on subsequent calls to roll over once the budget is exceeded.
+func TestFileWriterMaxRowGroupBytes(t *testing.T) {
+	alloc := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer alloc.AssertSize(t, 0)
+
+	// Small per-call batch so the byte budget is crossed after several calls,
+	// letting us observe multiple row group boundaries.
+	const rowsPerCall = int64(500)
+	const calls = 50
+	schema, record := buildInt64Record(t, alloc, rowsPerCall)
+	defer record.Release()
+
+	// Keep compression off and pages small so that totalUncompressedBytes
+	// advances predictably as we write. Without a small page size the
+	// counter only increments at page-flush boundaries (default 1 MiB),
+	// which would require ~8x more data to exercise.
+	const maxBytes = int64(16 * 1024)
+	output := &bytes.Buffer{}
+	writerProps := parquet.NewWriterProperties(
+		parquet.WithAllocator(alloc),
+		parquet.WithMaxRowGroupLength(math.MaxInt64),
+		parquet.WithMaxRowGroupBytes(maxBytes),
+		parquet.WithDataPageSize(4*1024),
+		parquet.WithCompression(compress.Codecs.Uncompressed),
+	)
+	writer, err := pqarrow.NewFileWriter(schema, output, writerProps,
+		pqarrow.NewArrowWriterProperties(pqarrow.WithAllocator(alloc)))
+	require.NoError(t, err)
+	for i := 0; i < calls; i++ {
+		require.NoError(t, writer.WriteBuffered(record))
+	}
+	require.NoError(t, writer.Close())
+
+	nRG, sizes, total := readRowGroupMeta(t, output.Bytes())
+	assert.Equal(t, rowsPerCall*calls, total, "all rows should be preserved")
+	assert.Greater(t, nRG, 1, "expected bytes trigger to produce multiple row groups")
+
+	// Every closed row group except the final tail must have crossed the
+	// threshold — that's the trigger condition.
+	for i := 0; i < nRG-1; i++ {
+		assert.GreaterOrEqual(t, sizes[i], maxBytes,
+			"row group %d size %d below threshold %d", i, sizes[i], maxBytes)
+	}
+}
+
+// TestFileWriterMaxRowGroupBytesDefaultDisabled confirms that the historical
+// behavior is preserved when WithMaxRowGroupBytes is not set (i.e. a single
+// buffered write produces a single row group regardless of size, bounded only
+// by MaxRowGroupLength).
+func TestFileWriterMaxRowGroupBytesDefaultDisabled(t *testing.T) {
+	alloc := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer alloc.AssertSize(t, 0)
+
+	const numRows = int64(50_000)
+	schema, record := buildInt64Record(t, alloc, numRows)
+	defer record.Release()
+
+	output := &bytes.Buffer{}
+	writerProps := parquet.NewWriterProperties(
+		parquet.WithAllocator(alloc),
+		parquet.WithMaxRowGroupLength(math.MaxInt64),
+		// MaxRowGroupBytes left at default (0 = unlimited).
+		parquet.WithDataPageSize(4*1024),
+		parquet.WithCompression(compress.Codecs.Uncompressed),
+	)
+	writer, err := pqarrow.NewFileWriter(schema, output, writerProps,
+		pqarrow.NewArrowWriterProperties(pqarrow.WithAllocator(alloc)))
+	require.NoError(t, err)
+	require.NoError(t, writer.WriteBuffered(record))
+	require.NoError(t, writer.Close())
+
+	nRG, _, total := readRowGroupMeta(t, output.Bytes())
+	assert.Equal(t, numRows, total)
+	assert.Equal(t, 1, nRG, "default (0) must preserve single-row-group behavior")
+}
+
+// TestFileWriterMaxRowGroupBytesRowLimitWins verifies that when both
+// MaxRowGroupLength and MaxRowGroupBytes are configured, whichever trigger
+// fires first closes the row group (AND semantics).
+func TestFileWriterMaxRowGroupBytesRowLimitWins(t *testing.T) {
+	alloc := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer alloc.AssertSize(t, 0)
+
+	const numRows = int64(50_000)
+	schema, record := buildInt64Record(t, alloc, numRows)
+	defer record.Release()
+
+	// Set row limit very tight (1_000) and bytes very loose (1 GiB).
+	// The row-limit pre-slicing should drive row-group boundaries alone;
+	// the bytes trigger should stay inert.
+	const rowLimit = int64(1_000)
+	output := &bytes.Buffer{}
+	writerProps := parquet.NewWriterProperties(
+		parquet.WithAllocator(alloc),
+		parquet.WithMaxRowGroupLength(rowLimit),
+		parquet.WithMaxRowGroupBytes(1<<30),
+		parquet.WithDataPageSize(4*1024),
+		parquet.WithCompression(compress.Codecs.Uncompressed),
+	)
+	writer, err := pqarrow.NewFileWriter(schema, output, writerProps,
+		pqarrow.NewArrowWriterProperties(pqarrow.WithAllocator(alloc)))
+	require.NoError(t, err)
+	require.NoError(t, writer.WriteBuffered(record))
+	require.NoError(t, writer.Close())
+
+	nRG, _, total := readRowGroupMeta(t, output.Bytes())
+	assert.Equal(t, numRows, total)
+	// With a 1 000-row cap and 50 000 rows, expect exactly 50 row groups.
+	assert.Equal(t, int(numRows/rowLimit), nRG)
+}
+
+// TestFileWriterMaxRowGroupBytesAcrossCalls ensures that the bytes-based
+// trigger accumulates state across successive WriteBuffered calls rather than
+// resetting on each one.
+func TestFileWriterMaxRowGroupBytesAcrossCalls(t *testing.T) {
+	alloc := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer alloc.AssertSize(t, 0)
+
+	schema, record := buildInt64Record(t, alloc, 5_000)
+	defer record.Release()
+
+	const maxBytes = int64(16 * 1024)
+	output := &bytes.Buffer{}
+	writerProps := parquet.NewWriterProperties(
+		parquet.WithAllocator(alloc),
+		parquet.WithMaxRowGroupLength(math.MaxInt64),
+		parquet.WithMaxRowGroupBytes(maxBytes),
+		parquet.WithDataPageSize(4*1024),
+		parquet.WithCompression(compress.Codecs.Uncompressed),
+	)
+	writer, err := pqarrow.NewFileWriter(schema, output, writerProps,
+		pqarrow.NewArrowWriterProperties(pqarrow.WithAllocator(alloc)))
+	require.NoError(t, err)
+
+	// Write the same record ten times. Each individual record at 5_000 rows
+	// × 8 bytes ≈ 40 KiB uncompressed, which exceeds the 16 KiB threshold,
+	// so every call should close a row group.
+	const iterations = 10
+	for i := 0; i < iterations; i++ {
+		require.NoError(t, writer.WriteBuffered(record))
+	}
+	require.NoError(t, writer.Close())
+
+	nRG, _, total := readRowGroupMeta(t, output.Bytes())
+	assert.Equal(t, int64(iterations*5_000), total)
+	assert.GreaterOrEqual(t, nRG, iterations,
+		"expected at least one row group per WriteBuffered call")
 }
 
 func TestWriteOnClosedFileWriter(t *testing.T) {

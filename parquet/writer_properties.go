@@ -176,6 +176,32 @@ func WithMaxRowGroupLength(nrows int64) WriterProperty {
 	}
 }
 
+// WithMaxRowGroupBytes specifies a target approximate uncompressed size in bytes
+// at which a row group should be closed and a new one started.
+//
+// A value of 0 (the default) disables the bytes-based trigger, preserving the
+// historical behavior of closing row groups solely on MaxRowGroupLength.
+//
+// The counted size is the sum of uncompressed data-page sizes (including
+// definition/repetition levels) emitted for the row group so far. It does not
+// include values still buffered inside column encoders that have not yet been
+// flushed into a page, so the effective trigger point is approximate.
+//
+// When both WithMaxRowGroupLength and WithMaxRowGroupBytes are set, the row
+// group closes on whichever limit is reached first. This matches the behavior
+// documented for `parquet.block.size` in parquet-mr and
+// `set_max_row_group_bytes` in parquet-rs.
+//
+// This option only takes effect when writing via high-level paths that track
+// row group size (e.g. pqarrow.FileWriter.WriteBuffered). Callers of the
+// low-level parquet/file.Writer manage row group boundaries explicitly and are
+// unaffected.
+func WithMaxRowGroupBytes(nbytes int64) WriterProperty {
+	return func(cfg *writerPropConfig) {
+		cfg.wr.maxRowGroupBytes = nbytes
+	}
+}
+
 // WithDataPageSize specifies the size to use for splitting data pages for column writing.
 func WithDataPageSize(pgsize int64) WriterProperty {
 	return func(cfg *writerPropConfig) {
@@ -490,6 +516,7 @@ type WriterProperties struct {
 	dictPagesize        int64
 	batchSize           int64
 	maxRowGroupLen      int64
+	maxRowGroupBytes    int64
 	pageSize            int64
 	parquetVersion      Version
 	createdBy           string
@@ -629,6 +656,7 @@ func (w *WriterProperties) DictionaryPageSizeLimit() int64   { return w.dictPage
 func (w *WriterProperties) Version() Version                 { return w.parquetVersion }
 func (w *WriterProperties) DataPageVersion() DataPageVersion { return w.dataPageVersion }
 func (w *WriterProperties) MaxRowGroupLength() int64         { return w.maxRowGroupLen }
+func (w *WriterProperties) MaxRowGroupBytes() int64          { return w.maxRowGroupBytes }
 func (w *WriterProperties) SortingColumns() []SortingColumn  { return w.sortingCols }
 
 // Compression returns the default compression type that will be used for any columns that don't

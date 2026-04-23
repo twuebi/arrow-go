@@ -50,6 +50,12 @@ type ColumnChunkWriter interface {
 	RowsWritten() int
 	// TotalCompressedBytes returns the number of bytes, after compression, that have been written so far
 	TotalCompressedBytes() int64
+	// TotalUncompressedBytes returns the cumulative uncompressed size (in bytes)
+	// of data pages emitted for this column chunk, including definition and
+	// repetition level bytes. Values still buffered inside the current encoder
+	// that have not yet been flushed into a page are not counted, so the
+	// returned value is a slight underestimate during active writes.
+	TotalUncompressedBytes() int64
 	// TotalBytesWritten includes the bytes for writing dictionary pages, while TotalCompressedBytes is
 	// just the data and page headers
 	TotalBytesWritten() int64
@@ -138,6 +144,11 @@ type columnWriter struct {
 	totalBytesWritten int64
 	// records the current number of compressed bytes in a column
 	totalCompressedBytes int64
+	// records the cumulative uncompressed size of data pages emitted for the
+	// current column chunk, including definition/repetition level bytes. Used
+	// by RowGroupWriter.TotalUncompressedBytes to back the bytes-based row
+	// group trigger.
+	totalUncompressedBytes int64
 	closed               bool
 	fallbackToNonDict    bool
 	dictPageWritten      bool
@@ -207,6 +218,10 @@ func (w *columnWriter) Properties() *parquet.WriterProperties {
 
 func (w *columnWriter) TotalCompressedBytes() int64 {
 	return w.totalCompressedBytes
+}
+
+func (w *columnWriter) TotalUncompressedBytes() int64 {
+	return w.totalUncompressedBytes
 }
 
 func (w *columnWriter) TotalBytesWritten() int64 {
@@ -345,6 +360,12 @@ func (w *columnWriter) FlushCurrentPage() error {
 			uncompressed64, int64(math.MaxInt32))
 	}
 	uncompressed := int32(uncompressed64)
+	// Account the uncompressed page size (def/rep levels + values) before we
+	// dispatch to the page builder. This is the signal used by
+	// RowGroupWriter.TotalUncompressedBytes to drive the bytes-based row group
+	// trigger; keeping the increment at a single site means both V1 and V2
+	// page paths stay in sync.
+	w.totalUncompressedBytes += uncompressed64
 	if isV1DataPage {
 		err = w.buildDataPageV1(defLevelsRLESize, repLevelsRLESize, uncompressed, values.Bytes())
 	} else {

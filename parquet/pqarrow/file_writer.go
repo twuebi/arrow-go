@@ -273,10 +273,11 @@ func (fw *FileWriter) WriteBuffered(rec arrow.RecordBatch) error {
 	}
 
 	var (
-		recList []arrow.RecordBatch
-		maxRows = fw.wr.Properties().MaxRowGroupLength()
-		curRows int
-		err     error
+		recList  []arrow.RecordBatch
+		maxRows  = fw.wr.Properties().MaxRowGroupLength()
+		maxBytes = fw.wr.Properties().MaxRowGroupBytes()
+		curRows  int
+		err      error
 	)
 	if fw.rgw != nil {
 		if curRows, err = fw.rgw.NumRows(); err != nil {
@@ -307,6 +308,20 @@ func (fw *FileWriter) WriteBuffered(rec arrow.RecordBatch) error {
 				fw.Close()
 				return err
 			}
+		}
+		// Bytes-based row group trigger: close the current row group if its
+		// accumulated uncompressed size has reached the configured target so
+		// that a subsequent WriteBuffered call (or the next iteration of this
+		// loop) starts a fresh row group. This mirrors the behavior of
+		// parquet-mr's `parquet.block.size` and parquet-rs's
+		// `set_max_row_group_bytes`, where the row group closes on whichever
+		// of the row-count or byte-size limits is reached first.
+		if maxBytes > 0 && fw.rgw != nil && fw.rgw.TotalUncompressedBytes() >= maxBytes {
+			if err := fw.rgw.Close(); err != nil {
+				fw.Close()
+				return err
+			}
+			fw.rgw = nil
 		}
 	}
 	fw.colIdx = 0
